@@ -56,6 +56,18 @@ impl ModelCatalog {
     /// Only checks presence — never reads or stores the actual secret.
     pub fn detect_auth(&mut self) {
         for provider in &mut self.providers {
+            // Claude Code is special: no API key needed, but we probe for CLI
+            // installation so the dashboard shows "Configured" vs "Not Installed".
+            if provider.id == "claude-code" {
+                provider.auth_status =
+                    if crate::drivers::claude_code::claude_code_available() {
+                        AuthStatus::Configured
+                    } else {
+                        AuthStatus::Missing
+                    };
+                continue;
+            }
+
             if !provider.key_required {
                 provider.auth_status = AuthStatus::NotRequired;
                 continue;
@@ -71,7 +83,7 @@ impl ModelCatalog {
                     std::env::var("OPENAI_API_KEY").is_ok()
                         || read_codex_credential().is_some()
                 }
-                "claude-code" => crate::drivers::claude_code::claude_code_available(),
+                // claude-code is handled above (before key_required check)
                 _ => false,
             };
 
@@ -778,7 +790,8 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("qwen", "qwen-plus"),
         ("glm", "glm-5-20250605"),
         ("ernie", "ernie-4.5-8k"),
-        ("kimi", "kimi-k2-0711"),
+        ("kimi", "kimi-k2"),
+        ("moonshot", "moonshot-v1-128k"),
         ("minimax", "MiniMax-M2.5"),
         ("minimax-m2.5", "MiniMax-M2.5"),
         ("minimax-m2.1", "MiniMax-M2.1"),
@@ -1614,6 +1627,91 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             max_output_tokens: 32_768,
             input_cost_per_m: 0.55,
             output_cost_per_m: 2.19,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        // OpenRouter free models
+        ModelCatalogEntry {
+            id: "openrouter/google/gemma-2-9b-it:free".into(),
+            display_name: "Gemma 2 9B Free (OpenRouter)".into(),
+            provider: "openrouter".into(),
+            tier: ModelTier::Fast,
+            context_window: 8_192,
+            max_output_tokens: 4_096,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "openrouter/meta-llama/llama-3.1-8b-instruct:free".into(),
+            display_name: "Llama 3.1 8B Free (OpenRouter)".into(),
+            provider: "openrouter".into(),
+            tier: ModelTier::Fast,
+            context_window: 131_072,
+            max_output_tokens: 4_096,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "openrouter/qwen/qwen-2.5-7b-instruct:free".into(),
+            display_name: "Qwen 2.5 7B Free (OpenRouter)".into(),
+            provider: "openrouter".into(),
+            tier: ModelTier::Fast,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "openrouter/mistralai/mistral-7b-instruct:free".into(),
+            display_name: "Mistral 7B Free (OpenRouter)".into(),
+            provider: "openrouter".into(),
+            tier: ModelTier::Fast,
+            context_window: 32_768,
+            max_output_tokens: 4_096,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "openrouter/huggingfaceh4/zephyr-7b-beta:free".into(),
+            display_name: "Zephyr 7B Free (OpenRouter)".into(),
+            provider: "openrouter".into(),
+            tier: ModelTier::Fast,
+            context_window: 4_096,
+            max_output_tokens: 2_048,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "openrouter/deepseek/deepseek-r1:free".into(),
+            display_name: "DeepSeek R1 Free (OpenRouter)".into(),
+            provider: "openrouter".into(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
             supports_tools: false,
             supports_vision: false,
             supports_streaming: true,
@@ -2898,7 +2996,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec![],
         },
         ModelCatalogEntry {
-            id: "kimi-k2-0711".into(),
+            id: "kimi-k2".into(),
             display_name: "Kimi K2".into(),
             provider: "moonshot".into(),
             tier: ModelTier::Frontier,
@@ -2909,10 +3007,10 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
-            aliases: vec!["kimi-k2".into()],
+            aliases: vec![],
         },
         ModelCatalogEntry {
-            id: "kimi-k2.5-0711".into(),
+            id: "kimi-k2.5".into(),
             display_name: "Kimi K2.5".into(),
             provider: "moonshot".into(),
             tier: ModelTier::Frontier,
@@ -2923,7 +3021,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
-            aliases: vec!["kimi-k2.5".into()],
+            aliases: vec![],
         },
         // ══════════════════════════════════════════════════════════════
         // Baidu Qianfan / ERNIE (3)

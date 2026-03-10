@@ -146,7 +146,9 @@ pub async fn agent_ws(
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
-    let api_key = &state.kernel.config.api_key;
+    // Trim whitespace so empty/whitespace-only api_key disables auth.
+    let api_key_raw = &state.kernel.config.api_key;
+    let api_key = api_key_raw.trim();
     if !api_key.is_empty() {
         // SECURITY: Use constant-time comparison to prevent timing attacks on API key
         let ct_eq = |token: &str, key: &str| -> bool {
@@ -1141,7 +1143,12 @@ fn classify_streaming_error(err: &openfang_kernel::error::KernelError) -> String
             }
         }
         llm_errors::LlmErrorCategory::Format => {
-            "LLM request failed. Check your API key and model configuration in Settings.".to_string()
+            // Claude Code CLI errors have actionable messages — pass them through
+            if inner.contains("Claude Code CLI") || inner.contains("claude auth") {
+                classified.raw_message.clone()
+            } else {
+                "LLM request failed. Check your API key and model configuration in Settings.".to_string()
+            }
         }
         _ => classified.sanitized_message,
     }
