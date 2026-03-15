@@ -140,13 +140,19 @@ pub async fn spawn_agent(
 
     let name = manifest.name.clone();
     match state.kernel.spawn_agent(manifest) {
-        Ok(id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!(SpawnResponse {
-                agent_id: id.to_string(),
-                name,
-            })),
-        ),
+        Ok(id) => {
+            // Register in channel router so binding resolution finds the new agent
+            if let Some(ref mgr) = *state.bridge_manager.lock().await {
+                mgr.router().register_agent(name.clone(), id);
+            }
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!(SpawnResponse {
+                    agent_id: id.to_string(),
+                    name,
+                })),
+            )
+        }
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             (
@@ -361,7 +367,7 @@ pub async fn send_message(
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     match state
         .kernel
-        .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
+        .send_message_with_handle(agent_id, &req.message, Some(kernel_handle), req.sender_id, req.sender_name)
         .await
     {
         Ok(result) => {
@@ -1341,7 +1347,7 @@ pub async fn send_message_stream(
     let (rx, _handle) =
         match state
             .kernel
-            .send_message_streaming(agent_id, &req.message, Some(kernel_handle))
+            .send_message_streaming(agent_id, &req.message, Some(kernel_handle), req.sender_id, req.sender_name)
         {
             Ok(pair) => pair,
             Err(e) => {
@@ -3974,7 +3980,9 @@ pub async fn install_hand_deps(
             let combined = format!("{stdout}{stderr}");
             let likely_ok = combined.contains("already installed")
                 || combined.contains("No applicable update")
-                || combined.contains("No available upgrade");
+                || combined.contains("No available upgrade")
+                || combined.contains("already an App at")
+                || combined.contains("is already installed");
             results.push(serde_json::json!({
                 "key": req.key,
                 "status": if likely_ok { "installed" } else { "error" },
@@ -7007,8 +7015,8 @@ pub async fn set_provider_key(
                 "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
                 name, model_id, env_var
             );
+            backup_config(&config_path);
             if let Ok(existing) = std::fs::read_to_string(&config_path) {
-                // Remove existing [default_model] section if present, then append
                 let cleaned = remove_toml_section(&existing, "default_model");
                 let _ = std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml));
             } else {
@@ -8173,7 +8181,7 @@ pub async fn run_schedule(
     );
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state.kernel.send_message_with_handle(target_agent, &run_message, Some(kernel_handle)).await {
+    match state.kernel.send_message_with_handle(target_agent, &run_message, Some(kernel_handle), None, None).await {
         Ok(result) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -8616,6 +8624,11 @@ pub async fn clone_agent(
         .kernel
         .registry
         .update_identity(new_id, source.identity.clone());
+
+    // Register in channel router so binding resolution finds the cloned agent
+    if let Some(ref mgr) = *state.bridge_manager.lock().await {
+        mgr.router().register_agent(req.new_name.clone(), new_id);
+    }
 
     (
         StatusCode::CREATED,
@@ -10839,6 +10852,12 @@ pub async fn auth_check(
 }
 
 /// Remove a `[section]` and its contents from a TOML string.
+#[allow(dead_code)]
+fn backup_config(config_path: &std::path::Path) {
+    let backup = config_path.with_extension("toml.bak");
+    let _ = std::fs::copy(config_path, backup);
+}
+
 fn remove_toml_section(content: &str, section: &str) -> String {
     let header = format!("[{}]", section);
     let mut result = String::new();

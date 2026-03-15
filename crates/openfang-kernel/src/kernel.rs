@@ -1389,7 +1389,7 @@ impl OpenFangKernel {
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_with_handle(agent_id, message, handle)
+        self.send_message_with_handle(agent_id, message, handle, None, None)
             .await
     }
 
@@ -1408,7 +1408,7 @@ impl OpenFangKernel {
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_with_handle_and_blocks(agent_id, message, handle, Some(blocks))
+        self.send_message_with_handle_and_blocks(agent_id, message, handle, Some(blocks), None, None)
             .await
     }
 
@@ -1418,8 +1418,10 @@ impl OpenFangKernel {
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_with_handle_and_blocks(agent_id, message, kernel_handle, None)
+        self.send_message_with_handle_and_blocks(agent_id, message, kernel_handle, None, sender_id, sender_name)
             .await
     }
 
@@ -1438,6 +1440,8 @@ impl OpenFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<openfang_types::message::ContentBlock>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
         // Acquire per-agent lock to serialize concurrent messages for the same agent.
         // This prevents session corruption when multiple messages arrive in quick
@@ -1467,7 +1471,7 @@ impl OpenFangKernel {
             self.execute_python_agent(&entry, agent_id, message).await
         } else {
             // Default: LLM agent loop (builtin:chat or any unrecognized module)
-            self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks)
+            self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks, sender_id, sender_name)
                 .await
         };
 
@@ -1522,6 +1526,8 @@ impl OpenFangKernel {
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -1602,7 +1608,7 @@ impl OpenFangKernel {
                 label: None,
             });
 
-        // Check if auto-compaction is needed: message-count OR token-count trigger
+        // Check if auto-compaction is needed: message-count OR token-count OR quota-headroom trigger
         let needs_compact = {
             use openfang_runtime::compactor::{
                 estimate_token_count, needs_compaction as check_compact,
@@ -1624,7 +1630,23 @@ impl OpenFangKernel {
                     "Token-based compaction triggered (messages below threshold but tokens above)"
                 );
             }
-            by_messages || by_tokens
+            let by_quota = if let Some(headroom) = self.scheduler.token_headroom(agent_id) {
+                let threshold = (headroom as f64 * 0.8) as u64;
+                if estimated as u64 > threshold && session.messages.len() > 4 {
+                    info!(
+                        agent_id = %agent_id,
+                        estimated_tokens = estimated,
+                        quota_headroom = headroom,
+                        "Quota-headroom compaction triggered (session would consume >80% of remaining quota)"
+                    );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            by_messages || by_tokens || by_quota
         };
 
         let tools = self.available_tools(agent_id);
@@ -1743,6 +1765,8 @@ impl OpenFangKernel {
                 },
                 peer_agents,
                 current_date: Some(chrono::Local::now().format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string()),
+                sender_id,
+                sender_name,
             };
             manifest.model.system_prompt =
                 openfang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -2069,6 +2093,7 @@ impl OpenFangKernel {
     }
 
     /// Execute the default LLM-based agent loop.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,
@@ -2076,6 +2101,8 @@ impl OpenFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<openfang_types::message::ContentBlock>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
         // Check metering quota before starting
         self.metering
@@ -2093,6 +2120,42 @@ impl OpenFangKernel {
                 context_window_tokens: 0,
                 label: None,
             });
+
+        // Pre-emptive compaction: compact before LLM call if session is large or quota headroom is low
+        {
+            use openfang_runtime::compactor::{
+                estimate_token_count, needs_compaction as check_compact,
+                needs_compaction_by_tokens, CompactionConfig,
+            };
+            let config = CompactionConfig::default();
+            let by_messages = check_compact(&session, &config);
+            let estimated = estimate_token_count(
+                &session.messages,
+                Some(&entry.manifest.model.system_prompt),
+                None,
+            );
+            let by_tokens = needs_compaction_by_tokens(estimated, &config);
+            let by_quota = if let Some(headroom) = self.scheduler.token_headroom(agent_id) {
+                let threshold = (headroom as f64 * 0.8) as u64;
+                estimated as u64 > threshold && session.messages.len() > 4
+            } else {
+                false
+            };
+            if by_messages || by_tokens || by_quota {
+                info!(agent_id = %agent_id, messages = session.messages.len(), estimated_tokens = estimated, "Pre-emptive compaction before LLM call");
+                match self.compact_agent_session(agent_id).await {
+                    Ok(msg) => {
+                        info!(agent_id = %agent_id, "{msg}");
+                        if let Ok(Some(reloaded)) = self.memory.get_session(session.id) {
+                            session = reloaded;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(agent_id = %agent_id, "Pre-emptive compaction failed: {e}");
+                    }
+                }
+            }
+        }
 
         let messages_before = session.messages.len();
 
@@ -2214,6 +2277,8 @@ impl OpenFangKernel {
                 },
                 peer_agents,
                 current_date: Some(chrono::Local::now().format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string()),
+                sender_id,
+                sender_name,
             };
             manifest.model.system_prompt =
                 openfang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -3868,7 +3933,7 @@ impl OpenFangKernel {
                                 let kh: std::sync::Arc<dyn openfang_runtime::kernel_handle::KernelHandle> = kernel.clone();
                                 match tokio::time::timeout(
                                     timeout,
-                                    kernel.send_message_with_handle(agent_id, message, Some(kh)),
+                                    kernel.send_message_with_handle(agent_id, message, Some(kh), None, None),
                                 )
                                 .await
                                 {
