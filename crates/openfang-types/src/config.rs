@@ -1513,10 +1513,24 @@ pub struct MemoryConfig {
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
+    /// Memory backend: "sqlite" (default) or "http".
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+    /// HTTP memory API URL (when backend = "http").
+    /// e.g., "http://127.0.0.1:5500"
+    #[serde(default)]
+    pub http_url: Option<String>,
+    /// Env var name holding the HTTP memory API bearer token.
+    #[serde(default)]
+    pub http_token_env: Option<String>,
 }
 
 fn default_consolidation_interval() -> u64 {
     24
+}
+
+fn default_memory_backend() -> String {
+    "sqlite".to_string()
 }
 
 impl Default for MemoryConfig {
@@ -1529,6 +1543,9 @@ impl Default for MemoryConfig {
             embedding_provider: None,
             embedding_api_key_env: None,
             consolidation_interval_hours: default_consolidation_interval(),
+            backend: default_memory_backend(),
+            http_url: None,
+            http_token_env: None,
         }
     }
 }
@@ -2401,6 +2418,17 @@ impl Default for BlueskyConfig {
     }
 }
 
+/// Feishu inbound event receive mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FeishuMode {
+    /// Receive events via HTTP webhook callback.
+    Webhook,
+    /// Receive events via WebSocket long connection.
+    #[default]
+    Websocket,
+}
+
 /// Feishu/Lark Open Platform channel adapter configuration.
 ///
 /// Supports both Feishu (China domestic, `open.feishu.cn`) and Lark
@@ -2412,6 +2440,8 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// Env var name holding the app secret.
     pub app_secret_env: String,
+    /// Inbound receive mode (`webhook` or `websocket`).
+    pub mode: FeishuMode,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
     /// Region: "cn" for Feishu (open.feishu.cn), "intl" for Lark (open.larksuite.com).
@@ -2437,6 +2467,7 @@ impl Default for FeishuConfig {
         Self {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
+            mode: FeishuMode::Websocket,
             webhook_port: 8453,
             region: "cn".to_string(),
             webhook_path: "/feishu/webhook".to_string(),
@@ -3945,6 +3976,31 @@ mod tests {
         assert_eq!(config.browser.max_sessions, browser_sessions);
         assert_eq!(config.web.fetch.max_response_bytes, fetch_bytes);
         assert_eq!(config.web.fetch.timeout_secs, fetch_timeout);
+    }
+
+    #[test]
+    fn test_feishu_mode_defaults_to_websocket() {
+        let toml_str = r#"
+            [channels.feishu]
+            app_id = "cli_test"
+            app_secret_env = "FEISHU_APP_SECRET"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let feishu = config.channels.feishu.unwrap();
+        assert_eq!(feishu.mode, FeishuMode::Websocket);
+    }
+
+    #[test]
+    fn test_feishu_mode_parses_websocket() {
+        let toml_str = r#"
+            [channels.feishu]
+            app_id = "cli_test"
+            app_secret_env = "FEISHU_APP_SECRET"
+            mode = "websocket"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let feishu = config.channels.feishu.unwrap();
+        assert_eq!(feishu.mode, FeishuMode::Websocket);
     }
 
     #[test]
